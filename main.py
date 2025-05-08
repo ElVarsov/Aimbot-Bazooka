@@ -5,27 +5,31 @@ import time
 
 # Distance calculation formula: Distance = (Focal length × Real object width) / Object width in pixels
 
+MODEL_NAME = 'yolov8n.pt'  # Path to YOLOv8 model file. Change to your model path if needed
+
 # Camera parameters
-FOCAL_LENGTH = 2     # Focal length in mm
-SENSOR_WIDTH_MM = 2  # Sensor width in mm
-REAL_OBJECT_WIDTH_MM = 500  
-VIDEO_PATH = 0  # Path to video file. Change to 0 (int) to use webcam
+FOCAL_LENGTH = 26     # Focal length in mm
+SENSOR_WIDTH_MM = 26  # Sensor width in mm
+REAL_OBJECT_WIDTH_MM = 4200
+VIDEO_PATH = "25m1x.mov"  # Path to video file. Change to 0 (int) to use webcam
 CAMERA_OFFSET_MM = 0 # To calibrate the distance to the camera, with Daniel's webcam this is 500mm
 
 # Lead targeting parameters
-PROJECTILE_SPEED = 5  # Projectile speed in m/s (adjust based on application)
+PROJECTILE_SPEED = 100  # Projectile speed in m/s (adjust based on application)
 MAX_HISTORY_FRAMES = 30  # Maximum number of past frames to keep for velocity calculation
 velocity_history = []
 TIME_WINDOW_VELOCITY = 30
 accepted_classes = ['car', 'truck', 'bus', 'motorcycle', 'bicycle'] # Classes we want to track
 
 def calculate_focal_length_pixels(focal_length_camera_mm, image_width_pixels, sensor_width_mm):
+
     if focal_length_camera_mm <= 0 or image_width_pixels <= 0 or sensor_width_mm <= 0:
         raise ValueError("Focal length camera (mm), image width (px), and sensor width (mm) must be positive values.")
     focal_length_pixels = focal_length_camera_mm * image_width_pixels / sensor_width_mm
     return focal_length_pixels
 
 def calculate_distance_mm(focal_length_pixels, real_object_width, object_size_in_pixels):
+
     if focal_length_pixels <= 0 or real_object_width <= 0 or object_size_in_pixels <= 0:
         raise ValueError("Focal length (px), real object width, and object size in pixels must be positive values.")
     distance = (focal_length_pixels * real_object_width) / object_size_in_pixels
@@ -62,7 +66,7 @@ def detect_objects(image, model):
         label = classes[class_id]
         
         # Only track vehicle classes (cars, trucks, buses, motorcycles, bicycles)
-        if label in ['car', 'truck', 'bus', 'motorcycle', 'bicycle', 'person']:
+        if label in accepted_classes:
             detected_objects.append({
                 'class': label,
                 'confidence': confidence,
@@ -108,7 +112,24 @@ def calculate_velocity(position_history, time_window = TIME_WINDOW_VELOCITY):
     
     return (0, 0)  # Default if calculation fails
 
-def predict_aim_point(current_position, velocity, distance_m, lead_time):
+def calculate_drop_off(distance_m, projectile_speed=PROJECTILE_SPEED):
+
+    # Time of flight = distance / horizontal speed
+    time_of_flight = distance_m / projectile_speed
+    
+    # Vertical drop due to gravity (in meters): y = 0.5 * g * t²
+    # Where g is acceleration due to gravity (9.81 m/s²)
+    drop_m = 0.5 * 9.81 * (time_of_flight ** 2)
+    
+    return drop_m  # Return drop in meters (will be converted to pixels later)
+
+def calculate_px_m_ratio(object_width_px, real_object_width_m):
+
+    # Convert real object width from mm to m for consistency
+    real_width_m = real_object_width_m / 1000.0
+    return object_width_px / real_width_m
+
+def predict_aim_point(current_position, velocity, distance_m, lead_time, object_width_px):
 
     # Simple linear prediction: new_position = current_position + velocity * time
     future_x = current_position[0] + velocity[0] * lead_time
@@ -117,6 +138,20 @@ def predict_aim_point(current_position, velocity, distance_m, lead_time):
     # Ensure the point stays within screen boundaries (assuming 1280x720 resolution)
     future_x = max(0, min(future_x, 1280))
     future_y = max(0, min(future_y, 720))
+
+    # Calculate drop due to gravity (in meters)
+    drop_m = calculate_drop_off(distance_m, PROJECTILE_SPEED)
+    
+    # Calculate pixels per meter for this target
+    real_object_width_m = REAL_OBJECT_WIDTH_MM / 1000.0  # Convert mm to m
+    px_per_meter = object_width_px / real_object_width_m
+    
+    # Convert drop from meters to pixels
+    drop_px = drop_m * px_per_meter
+    
+    # Adjust aim point to compensate for gravity (aim higher)
+    # Subtract because y-axis is inverted in image coordinates (0 at top)
+    future_y -= drop_px
     
     return (int(future_x), int(future_y))
 
@@ -149,7 +184,7 @@ def main():
     Main function that processes the video feed and displays results.
     """
     # Load the YOLOv8 model for object detection
-    model = YOLO('yolov8n.pt')
+    model = YOLO(MODEL_NAME)
     
     # Open the video capture device (file or webcam)
     cap = cv2.VideoCapture(VIDEO_PATH)
@@ -223,10 +258,11 @@ def main():
             main_object = detected_objects[0]  # Focus on the first detected object
             object_id = f"{main_object['class']}_{0}"  # Create a simple ID for the object
             current_position = main_object["center"]  # Center point of the object
+            object_width_px = main_object["w"]  # Width of the object in pixels
             
             # Calculate distance to object using camera parameters
             focal_length_pixels = calculate_focal_length_pixels(FOCAL_LENGTH, frame.shape[1], SENSOR_WIDTH_MM)
-            distance_mm = calculate_distance_mm(focal_length_pixels, REAL_OBJECT_WIDTH_MM, main_object["w"])
+            distance_mm = calculate_distance_mm(focal_length_pixels, REAL_OBJECT_WIDTH_MM, object_width_px)
             distance_m = distance_mm / 1000  # Convert to meters
             print(f"Distance to {main_object['class']}: {distance_m:.2f} m")
             
@@ -247,13 +283,19 @@ def main():
             lead_time = distance_m / PROJECTILE_SPEED  # Time in seconds
             
             # Predict where to aim based on object movement
-            aim_point = predict_aim_point(current_position, velocity, distance_m, lead_time)
+            aim_point = predict_aim_point(current_position, velocity, distance_m, lead_time, object_width_px)
             
             # Draw aim point as a red crosshair
             cv2.drawMarker(frame, aim_point, (0, 0, 255), cv2.MARKER_CROSS, 20, 2)
             
-            # Display distance information at the bottom of the screen
-            info_text = f"Distance: {distance_m:.1f}m"
+            # Calculate drop for display purposes
+            drop_m = calculate_drop_off(distance_m, PROJECTILE_SPEED)
+            real_object_width_m = REAL_OBJECT_WIDTH_MM / 1000.0
+            px_per_meter = object_width_px / real_object_width_m
+            drop_px = drop_m * px_per_meter
+            
+            # Display distance and drop information at the bottom of the screen
+            info_text = f"Distance: {distance_m:.1f}m | Drop: {drop_m:.2f}m ({drop_px:.1f}px)"
             cv2.putText(frame, info_text, (10, frame.shape[0] - 20), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (255, 255, 255), 1)
             
             # Add current position to tracking queue
@@ -276,9 +318,11 @@ def main():
         if cv2.waitKey(1) & 0xFF == ord('q'):
             break
 
+    # Cleanup
     cap.release()
     cv2.destroyAllWindows()
 
+    # If you want to see the velocity graph, uncomment this line
     # create_velocity_graph(velocity_history)
 
 

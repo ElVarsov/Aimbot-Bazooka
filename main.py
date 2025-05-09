@@ -214,6 +214,7 @@ def main():
     
     frame_count = 0
     start_time = time.time()  # Record start time for timing calculations
+    crosshair_prev_pos = None
     
     # Main loop for processing video frames
     while True:
@@ -250,55 +251,58 @@ def main():
         # This compensates for camera movement to keep tracking consistent
         prev_points_queue = list(map(lambda x: apply_affine_transformation(affine_matrix, x), prev_points_queue))
 
+        if frame_count % 3 == 0:
         # Detect objects (vehicles) in the current frame
-        detected_objects = detect_objects(frame, model)
+            detected_objects = detect_objects(frame, model)
+            
+            # Process the first detected object
+            if detected_objects:
+                main_object = detected_objects[0]  # Focus on the first detected object
+                object_id = f"{main_object['class']}_{0}"  # Create a simple ID for the object
+                current_position = main_object["center"]  # Center point of the object
+                object_width_px = main_object["w"]  # Width of the object in pixels
+                
+                # Calculate distance to object using camera parameters
+                focal_length_pixels = calculate_focal_length_pixels(FOCAL_LENGTH, frame.shape[1], SENSOR_WIDTH_MM)
+                distance_mm = calculate_distance_mm(focal_length_pixels, REAL_OBJECT_WIDTH_MM, object_width_px)
+                distance_m = distance_mm / 1000  # Convert to meters
+                
+                # Store position with timestamp for velocity calculation
+                if object_id not in tracking_history:
+                    tracking_history[object_id] = []
+                tracking_history[object_id].append((current_position, current_time))
+                
+                # Limit history size to prevent using too much memory
+                if len(tracking_history[object_id]) > MAX_HISTORY_FRAMES:
+                    tracking_history[object_id].pop(0)  # Remove oldest entry
+                
+                # Calculate velocity from position history
+                velocity = calculate_velocity(tracking_history[object_id])
+                
+                # Calculate lead time based on distance and projectile speed    
+                # Lead time = distance / speed (basic physics formula)
+                lead_time = distance_m / PROJECTILE_SPEED  # Time in seconds
+                
+                # Predict where to aim based on object movement
+                aim_point = predict_aim_point(current_position, velocity, distance_m, lead_time, object_width_px)
+                
+                crosshair_prev_pos = aim_point
+                                
+                # Calculate drop for display purposes
+                drop_m = calculate_drop_off(distance_m, PROJECTILE_SPEED)
+                real_object_width_m = REAL_OBJECT_WIDTH_MM / 1000.0
+                px_per_meter = object_width_px / real_object_width_m
+                drop_px = drop_m * px_per_meter
+                
+                # Display distance and drop information at the bottom of the screen
+                info_text = f"Distance: {distance_m:.1f}m | Drop: {drop_m:.2f}m ({drop_px:.1f}px)"
+                cv2.putText(frame, info_text, (10, frame.shape[0] - 20), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (255, 255, 255), 1)
+                
+                # Add current position to tracking queue
+                prev_points_queue.append(current_position)
+
         
-        # Process the first detected object
-        if detected_objects:
-            main_object = detected_objects[0]  # Focus on the first detected object
-            object_id = f"{main_object['class']}_{0}"  # Create a simple ID for the object
-            current_position = main_object["center"]  # Center point of the object
-            object_width_px = main_object["w"]  # Width of the object in pixels
-            
-            # Calculate distance to object using camera parameters
-            focal_length_pixels = calculate_focal_length_pixels(FOCAL_LENGTH, frame.shape[1], SENSOR_WIDTH_MM)
-            distance_mm = calculate_distance_mm(focal_length_pixels, REAL_OBJECT_WIDTH_MM, object_width_px)
-            distance_m = distance_mm / 1000  # Convert to meters
-            
-            # Store position with timestamp for velocity calculation
-            if object_id not in tracking_history:
-                tracking_history[object_id] = []
-            tracking_history[object_id].append((current_position, current_time))
-            
-            # Limit history size to prevent using too much memory
-            if len(tracking_history[object_id]) > MAX_HISTORY_FRAMES:
-                tracking_history[object_id].pop(0)  # Remove oldest entry
-            
-            # Calculate velocity from position history
-            velocity = calculate_velocity(tracking_history[object_id])
-            
-            # Calculate lead time based on distance and projectile speed    
-            # Lead time = distance / speed (basic physics formula)
-            lead_time = distance_m / PROJECTILE_SPEED  # Time in seconds
-            
-            # Predict where to aim based on object movement
-            aim_point = predict_aim_point(current_position, velocity, distance_m, lead_time, object_width_px)
-            
-            # Draw aim point as a red crosshair
-            cv2.drawMarker(frame, aim_point, (0, 0, 255), cv2.MARKER_CROSS, 20, 2)
-            
-            # Calculate drop for display purposes
-            drop_m = calculate_drop_off(distance_m, PROJECTILE_SPEED)
-            real_object_width_m = REAL_OBJECT_WIDTH_MM / 1000.0
-            px_per_meter = object_width_px / real_object_width_m
-            drop_px = drop_m * px_per_meter
-            
-            # Display distance and drop information at the bottom of the screen
-            info_text = f"Distance: {distance_m:.1f}m | Drop: {drop_m:.2f}m ({drop_px:.1f}px)"
-            cv2.putText(frame, info_text, (10, frame.shape[0] - 20), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (255, 255, 255), 1)
-            
-            # Add current position to tracking queue
-            prev_points_queue.append(current_position)
+        cv2.drawMarker(frame, crosshair_prev_pos, (0, 0, 255), cv2.MARKER_CROSS, 20, 2)
 
         # Limit tracking queue size to prevent cluttering the visualization
         if len(prev_points_queue) > 5:

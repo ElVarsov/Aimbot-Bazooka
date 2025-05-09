@@ -5,20 +5,24 @@ import time
 
 # Distance calculation formula: Distance = (Focal length × Real object width) / Object width in pixels
 
-MODEL_NAME = 'yolov8n.pt'  # Path to YOLOv8 model file. Change to your model path if needed
+
+# Change to your model path if needed. 
+# Rasp pi 5 only supports nano models
+MODEL_NAME = 'yolov8n.pt'  
 
 # Camera parameters
 FOCAL_LENGTH = 26     # Focal length in mm
 SENSOR_WIDTH_MM = 26  # Sensor width in mm
 REAL_OBJECT_WIDTH_MM = 4200
 VIDEO_PATH = "25m1x.mov"  # Path to video file. Change to 0 (int) to use webcam
-CAMERA_OFFSET_MM = 0 # To calibrate the distance to the camera, with Daniel's webcam this is 500mm
+# CAMERA_OFFSET_MM = 0 # To calibrate the distance to the camera
 
 # Lead targeting parameters
-PROJECTILE_SPEED = 100  # Projectile speed in m/s (adjust based on application)
+PROJECTILE_SPEED = 100  # Projectile speed in m/s 
 MAX_HISTORY_FRAMES = 30  # Maximum number of past frames to keep for velocity calculation
+TIME_WINDOW_VELOCITY = 30 # Actual time window for velocity calculations (frames)
+
 velocity_history = []
-TIME_WINDOW_VELOCITY = 30
 accepted_classes = ['car', 'truck', 'bus', 'motorcycle', 'bicycle'] # Classes we want to track
 
 def calculate_focal_length_pixels(focal_length_camera_mm, image_width_pixels, sensor_width_mm):
@@ -33,12 +37,13 @@ def calculate_distance_mm(focal_length_pixels, real_object_width, object_size_in
     if focal_length_pixels <= 0 or real_object_width <= 0 or object_size_in_pixels <= 0:
         raise ValueError("Focal length (px), real object width, and object size in pixels must be positive values.")
     distance = (focal_length_pixels * real_object_width) / object_size_in_pixels
-    return distance - CAMERA_OFFSET_MM  # Adjust for camera offset
+    # distance -= CAMERA_OFFSET_MM 
+    return distance 
 
 def detect_objects(image, model):
 
     classes = model.names
-    # Run object detection
+    
     results = model.predict(image, verbose=False)
 
     detected_objects = []
@@ -93,6 +98,7 @@ def calculate_velocity(position_history, time_window = TIME_WINDOW_VELOCITY):
         
     # Get the most recent positions
     recent_positions = position_history[-time_window:]
+
     
     # If we have enough history
     if len(recent_positions) >= 2:
@@ -114,18 +120,15 @@ def calculate_velocity(position_history, time_window = TIME_WINDOW_VELOCITY):
 
 def calculate_drop_off(distance_m, projectile_speed=PROJECTILE_SPEED):
 
-    # Time of flight = distance / horizontal speed
     time_of_flight = distance_m / projectile_speed
     
     # Vertical drop due to gravity (in meters): y = 0.5 * g * t²
-    # Where g is acceleration due to gravity (9.81 m/s²)
+    # Where g is gravity (9.81 m/s^2)
     drop_m = 0.5 * 9.81 * (time_of_flight ** 2)
     
     return drop_m  # Return drop in meters (will be converted to pixels later)
 
 def calculate_px_m_ratio(object_width_px, real_object_width_m):
-
-    # Convert real object width from mm to m for consistency
     real_width_m = real_object_width_m / 1000.0
     return object_width_px / real_width_m
 
@@ -159,7 +162,6 @@ def create_velocity_graph(velocity_history):
 
     import matplotlib.pyplot as plt
     
-    # Unzip the velocity history into x and y components
     if not velocity_history:
         print("No velocity data to plot.")
         return
@@ -180,10 +182,7 @@ def create_velocity_graph(velocity_history):
 
 
 def main():
-    """
-    Main function that processes the video feed and displays results.
-    """
-    # Load the YOLOv8 model for object detection
+
     model = YOLO(MODEL_NAME)
     
     # Open the video capture device (file or webcam)
@@ -198,6 +197,7 @@ def main():
     bf = cv2.BFMatcher(cv2.NORM_HAMMING, crossCheck=True)  # Brute Force matcher with Hamming distance
 
     # Read the first frame
+    # .read() returns a boolean indicating success and the frame itself
     ret, prev_frame = cap.read()
     if not ret:
         print("Failed to capture video.")
@@ -215,7 +215,7 @@ def main():
     frame_count = 0
     start_time = time.time()  # Record start time for timing calculations
     
-    # Main processing loop
+    # Main loop for processing video frames
     while True:
         # Read a frame from the video source
         ret, frame = cap.read()
@@ -253,7 +253,7 @@ def main():
         # Detect objects (vehicles) in the current frame
         detected_objects = detect_objects(frame, model)
         
-        # Process the first detected object (if any)
+        # Process the first detected object
         if detected_objects:
             main_object = detected_objects[0]  # Focus on the first detected object
             object_id = f"{main_object['class']}_{0}"  # Create a simple ID for the object
@@ -264,7 +264,6 @@ def main():
             focal_length_pixels = calculate_focal_length_pixels(FOCAL_LENGTH, frame.shape[1], SENSOR_WIDTH_MM)
             distance_mm = calculate_distance_mm(focal_length_pixels, REAL_OBJECT_WIDTH_MM, object_width_px)
             distance_m = distance_mm / 1000  # Convert to meters
-            print(f"Distance to {main_object['class']}: {distance_m:.2f} m")
             
             # Store position with timestamp for velocity calculation
             if object_id not in tracking_history:

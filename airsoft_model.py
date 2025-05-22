@@ -9,14 +9,14 @@ import math
 MODEL_NAME = 'yolov8n.pt'  
 
 # Camera parameters
-FOCAL_LENGTH = 26     # Focal length in mm
-SENSOR_WIDTH_MM = 26  # Sensor width in mm
-REAL_OBJECT_WIDTH_MM = 4200  # Real width of target object in mm
+FOCAL_LENGTH = 3     # Focal length in mm
+SENSOR_WIDTH_MM = 3  # Sensor width in mm
+REAL_OBJECT_WIDTH_MM = 500  # Real width of target object in mm
 VIDEO_PATH = 0  # Path to video file. Change to 0 (int) to use webcam
-RESOLUTION = (1280, 720)  # Resolution of the video
+RESOLUTION = (640, 480)  # Resolution of the video
 
 # Targeting parameters
-MAX_HISTORY_FRAMES = 30  # Maximum number of past frames to keep for velocity calculation
+MAX_HISTORY_FRAMES = 30  # Maxqimum number of past frames to keep for velocity calculation
 TIME_WINDOW_VELOCITY = 30  # Actual time window for velocity calculations (frames)
 DETECTION_INTERVAL = 1  # Interval for object detection (in frames)
 CROSSHAIR_POS = (RESOLUTION[0] // 2, RESOLUTION[1] // 2)  # position in the center
@@ -35,7 +35,7 @@ AIRSOFT_CONFIG = {
 }
 
 velocity_history = []
-accepted_classes = ['car']  # Classes we want to track
+accepted_classes = ["person"]  # Classes we want to track
 
 def calculate_focal_length_pixels(focal_length_camera_mm, image_width_pixels, sensor_width_mm):
     if focal_length_camera_mm <= 0 or image_width_pixels <= 0 or sensor_width_mm <= 0:
@@ -282,7 +282,8 @@ def main():
     frame_count = 0
     start_time = time.time()  # Record start time for timing calculations
     crosshair_prev_pos = CROSSHAIR_POS
-    
+    new_aim_point = None
+
     # Main loop for processing video frames
     while True:
         # Read a frame from the video source
@@ -353,8 +354,13 @@ def main():
                 
                 # Predict where to aim based on object movement
                 aim_point = predict_aim_point(current_position, velocity, distance_m, lead_time, object_width_px, AIRSOFT_CONFIG)
+
+                offset_x = aim_point[0] - current_position[0]
+                offset_y = abs(aim_point[1] - current_position[1])
                 
                 crosshair_prev_pos = aim_point
+
+                new_aim_point = (CROSSHAIR_POS[0] - offset_x, int(CROSSHAIR_POS[1] + offset_y))
                                 
                 # Calculate drop for display purposes
                 drop_m = calculate_drop_off(distance_m, AIRSOFT_CONFIG)
@@ -368,9 +374,11 @@ def main():
                 
                 # Add current position to tracking queue
                 prev_points_queue.append(current_position)
+            else:
+                drop_px = 0 
 
         
-        cv2.drawMarker(frame, crosshair_prev_pos, (0, 0, 255), cv2.MARKER_CROSS, 20, 2)
+        cv2.drawMarker(frame, new_aim_point if new_aim_point else CROSSHAIR_POS, (0, 0, 255), cv2.MARKER_CROSS, 20, 2)
 
         # Limit tracking queue size to prevent cluttering the visualization
         if len(prev_points_queue) > 5:

@@ -1,29 +1,33 @@
 import gi
 gi.require_version('Gst', '1.0')
-from gi.repository import Gst
-import hailo
-from hailo_apps_infra.hailo_rpi_common import app_callback_class
-from hailo_apps_infra.detection_pipeline_simple import GStreamerDetectionApp
-import cv2
+from gi.repository import Gst, GLib
 import numpy as np
-import time
+import cv2
+import hailo
 import math
+import time
 
-# User-defined class to be used in the callback function: Inheritance from the app_callback_class
+from hailo_apps_infra.hailo_rpi_common import (
+    get_caps_from_pad,
+    get_numpy_from_buffer,
+    app_callback_class,
+)
+from hailo_apps_infra.detection_pipeline import GStreamerDetectionApp
+
+# -----------------------------------------------------------------------------------------------
+# User-defined class to be used in the callback function
+# -----------------------------------------------------------------------------------------------
+# Inheritance from the app_callback_class
 class user_app_callback_class(app_callback_class):
     def __init__(self):
         super().__init__()
-        self.MODEL_NAME = 'yolov8n.pt'  
-
-        # Camera parameters
         self.FOCAL_LENGTH = 26     # Focal length in mm
         self.SENSOR_WIDTH_MM = 26  # Sensor width in mm
-        self.REAL_OBJECT_WIDTH_MM = 4200  # Real width of target object in mm
-        self.VIDEO_PATH = "25m1x.mov"  # Path to video file. Change to 0 (int) to use webcam
-        self.RESOLUTION = (640, 640)  # Resolution of the video
+        self.REAL_OBJECT_WIDTH_MM = 4200  # Real width of target object in mm  
+        self.RESOLUTION = (640, 480)  # Resolution of the video
 
         # Targeting parameters
-        self.MAX_HISTORY_FRAMES = 30  # Maximum number of past frames to keep for velocity calculation
+        self.MAX_HISTORY_FRAMES = 30  # Maxqimum number of past frames to keep for velocity calculation
         self.TIME_WINDOW_VELOCITY = 30  # Actual time window for velocity calculations (frames)
         self.DETECTION_INTERVAL = 1  # Interval for object detection (in frames)
         self.CROSSHAIR_POS = (self.RESOLUTION[0] // 2, self.RESOLUTION[1] // 2)  # position in the center
@@ -42,39 +46,62 @@ class user_app_callback_class(app_callback_class):
         }
 
         self.velocity_history = []   
-        self.accepted_classes = ["car"]  # Classes we want to track
-        
-        # Tracking variables
-        self.tracking_history = {}  # Dictionary to store position history with timestamps
-        self.start_time = time.time()
+        self.accepted_classes = ["car"]   # Classes we want to track
+        self.prev_points_queue = []  # Queue to store previous object center points
+        self.tracking_history = {}
+
+        self.prev_gray = None
+        self.prev_kp = None
+        self.prev_des = None
+        self.affine_matrix = None
         self.new_aim_point = None
         self.crosshair_prev_pos = self.CROSSHAIR_POS
         
-        # ORB feature detector for camera movement compensation
+        # Initialize ORB detector and matcher
         self.orb = cv2.ORB_create(1000)
         self.bf = cv2.BFMatcher(cv2.NORM_HAMMING, crossCheck=True)
-        self.prev_frame = None
-        self.prev_kp = None
-        self.prev_des = None
-        self.prev_points_queue = []
-
-        print("Airsoft Ballistic Tracking System Initialized")
-        print(f"Muzzle velocity: {self.AIRSOFT_CONFIG['muzzle_velocity']} m/s")
-        print(f"BB mass: {self.AIRSOFT_CONFIG['bb_mass']*1000:.2f} g")
-        print(f"BB diameter: {self.AIRSOFT_CONFIG['bb_diameter']*1000:.0f} mm")
-        print(f"Drag coefficient: {self.AIRSOFT_CONFIG['drag_coefficient']}")
+        
+        # Frame counter for detection interval
+        self.frame_counter = 0
 
     def calculate_focal_length_pixels(self, focal_length_camera_mm, image_width_pixels, sensor_width_mm):
         if focal_length_camera_mm <= 0 or image_width_pixels <= 0 or sensor_width_mm <= 0:
             raise ValueError("Focal length camera (mm), image width (px), and sensor width (mm) must be positive values.")
         focal_length_pixels = focal_length_camera_mm * image_width_pixels / sensor_width_mm
         return focal_length_pixels
-
+    
     def calculate_distance_mm(self, focal_length_pixels, real_object_width, object_size_in_pixels):
         if focal_length_pixels <= 0 or real_object_width <= 0 or object_size_in_pixels <= 0:
             raise ValueError("Focal length (px), real object width, and object size in pixels must be positive values.")
         distance = (focal_length_pixels * real_object_width) / object_size_in_pixels
         return distance 
+
+    def detect_objects(self, image):
+
+        detected_objects = []
+        roi = hailo.get_roi_from_buffer(image)
+        boxes = roi.get_objects_typed(hailo.HAILO_DETECTION)
+        
+        for box in boxes:
+
+            x1, y1, x2, y2 = box.bbox()
+            w = (x2 - x1) * self.RESOLUTION[0]
+            h = (y2 - y1) * self.RESOLUTION[1]
+            cx = (x1 + x2) / 2 * self.RESOLUTION[0]
+            cy = (y1 + y2) / 2 * self.RESOLUTION[1]
+            label = box.get_label()
+            conf = box.get_confidence()
+            
+            if label in self.accepted_classes:
+                detected_objects.append({
+                    'class': label,
+                    'w': w,
+                    'h': h,
+                    'confidence': conf, 
+                    'center': (int(cx), int(cy)),
+                })
+
+        return detected_objects
 
     def apply_affine_transformation(self, affine_matrix, point):
         dot_position_array = np.array([point], dtype=np.float32)
@@ -152,16 +179,14 @@ class user_app_callback_class(app_callback_class):
             print(f"Time of flight: {time_of_flight:.3f} seconds, Distance: {distance_m:.1f} m")
             return time_of_flight
         else:
-            print(f"No valid solution for flight time, target may be too far., Distance:{distance_m:.1f} m]")
+            print(f"Failed to fetch flight time., Distance:{distance_m:.1f} m]")
             return 0
 
-    def calculate_velocity(self, position_history, time_window=None):
-        if time_window is None:
-            time_window = self.TIME_WINDOW_VELOCITY
-            
+    def calculate_velocity(self, position_history):
         if len(position_history) < 2:
             return (0, 0)  # Not enough data points to calculate velocity
             
+        time_window = 30  # seconds
         # Get the most recent positions
         recent_positions = position_history[-time_window:]
         
@@ -222,166 +247,152 @@ class user_app_callback_class(app_callback_class):
         
         return (int(future_x), int(future_y))
 
-    def process_detections(self, detections, frame_data=None):
-        """
-        Process Hailo detections and perform ballistic calculations
-        """
-        current_time = time.time() - self.start_time
-        detected_objects = []
-        
-        # Convert Hailo detections to our format
-        for detection in detections:
-            label = detection.get_label()
-            if label in self.accepted_classes:
-                bbox = detection.get_bbox()
-                confidence = detection.get_confidence()
-                
-                # Calculate center and dimensions
-                x1, y1, x2, y2 = bbox.xmin(), bbox.ymin(), bbox.xmax(), bbox.ymax()
-                w = x2 - x1
-                h = y2 - y1
-                cx = (x1 + x2) / 2
-                cy = (y1 + y2) / 2
-                
-                detected_objects.append({
-                    'class': label,
-                    'confidence': confidence,
-                    'w': w,
-                    'h': h,
-                    'center': (int(cx), int(cy)),
-                })
-        
-        # Process the first detected object for ballistic calculations
-        if detected_objects:
-            main_object = detected_objects[0]  # Focus on the first detected object
-            object_id = f"{main_object['class']}_{0}"  # Create a simple ID for the object
-            current_position = main_object["center"]  # Center point of the object
-            object_width_px = main_object["w"]  # Width of the object in pixels
+# -----------------------------------------------------------------------------------------------
+# User-defined callback function
+# -----------------------------------------------------------------------------------------------
+
+# This is the callback function that will be called when data is available from the pipeline
+def app_callback(pad, info, user_data):
+    start_time = time.time()
+    # Get the GstBuffer from the probe info
+    buffer = info.get_buffer()
+    # Check if the buffer is valid
+    if buffer is None:
+        return Gst.PadProbeReturn.OK
+
+    # Using the user_data to count the number of frames
+    user_data.increment()
+    frame_count = user_data.get_count()
+
+    # Get the caps from the pad
+    format, width, height = get_caps_from_pad(pad)
+
+    # If the user_data.use_frame is set to True, we can get the video frame from the buffer
+    frame = None
+    if user_data.use_frame and format is not None and width is not None and height is not None:
+        # Get video frame
+        frame = get_numpy_from_buffer(buffer, format, width, height)
+
+    # Skip processing if frame is None
+    if frame is None:
+        return Gst.PadProbeReturn.OK
+
+    current_time = time.time() - start_time
+
+    # Draw crosshair
+    cv2.drawMarker(frame, user_data.CROSSHAIR_POS, (255, 0, 0), cv2.MARKER_CROSS, 20, 2)
+
+    # Convert to grayscale for feature detection
+    gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
+    kp, des = user_data.orb.detectAndCompute(gray, None)
+
+    # Initialize previous frame data on first run
+    if user_data.prev_gray is None:
+        user_data.prev_gray = gray
+        user_data.prev_kp = kp
+        user_data.prev_des = des
+        return Gst.PadProbeReturn.OK
+
+    # Skip processing if no features are found
+    if des is None or user_data.prev_des is None:
+        user_data.prev_gray = gray
+        user_data.prev_kp, user_data.prev_des = kp, des
+        return Gst.PadProbeReturn.OK
+
+    # Match features between frames to detect camera movement
+    matches = user_data.bf.match(user_data.prev_des, des)
+    matches = sorted(matches, key=lambda x: x.distance)  # Sort by match quality
+    good_matches = matches[:50]  # Use the top 50 best matches
+
+    # Calculate the affine transformation between frames if enough good matches
+    if len(good_matches) >= 3:
+        pts1 = np.float32([user_data.prev_kp[m.queryIdx].pt for m in good_matches])
+        pts2 = np.float32([kp[m.trainIdx].pt for m in good_matches])
+        user_data.affine_matrix, inliers = cv2.estimateAffine2D(pts1, pts2)
+
+    # Apply the affine transformation to all previously tracked points
+    if user_data.affine_matrix is not None:
+        user_data.prev_points_queue = [user_data.apply_affine_transformation(user_data.affine_matrix, x) for x in user_data.prev_points_queue]
+    
+    # Process detections at specified interval
+    if user_data.frame_counter % user_data.DETECTION_INTERVAL == 0:
+        detections = user_data.detect_objects(buffer)  # Pass buffer instead of frame
+
+        if detections:
+            main_obj = detections[0]
+            object_id = f"{main_obj['class']}_{0}"
+            
+            current_position = main_obj["center"]  # Center point of the object
+            object_width_px = main_obj["w"]  # Width of the object in pixels
             
             # Calculate distance to object using camera parameters
-            focal_length_pixels = self.calculate_focal_length_pixels(
-                self.FOCAL_LENGTH, self.RESOLUTION[0], self.SENSOR_WIDTH_MM
-            )
-            distance_mm = self.calculate_distance_mm(
-                focal_length_pixels, self.REAL_OBJECT_WIDTH_MM, object_width_px
-            )
+            focal_length_pixels = user_data.calculate_focal_length_pixels(user_data.FOCAL_LENGTH, user_data.RESOLUTION[0], user_data.SENSOR_WIDTH_MM)
+            distance_mm = user_data.calculate_distance_mm(focal_length_pixels, user_data.REAL_OBJECT_WIDTH_MM, object_width_px)
             distance_m = distance_mm / 1000  # Convert to meters
             
             # Store position with timestamp for velocity calculation
-            if object_id not in self.tracking_history:
-                self.tracking_history[object_id] = []
-            self.tracking_history[object_id].append((current_position, current_time))
+            if object_id not in user_data.tracking_history:
+                user_data.tracking_history[object_id] = []
+            user_data.tracking_history[object_id].append((current_position, current_time))
             
             # Limit history size to prevent using too much memory
-            if len(self.tracking_history[object_id]) > self.MAX_HISTORY_FRAMES:
-                self.tracking_history[object_id].pop(0)  # Remove oldest entry
+            if len(user_data.tracking_history[object_id]) > user_data.MAX_HISTORY_FRAMES:
+                user_data.tracking_history[object_id].pop(0)  # Remove oldest entry
             
             # Calculate velocity from position history
-            velocity = self.calculate_velocity(self.tracking_history[object_id])
+            velocity = user_data.calculate_velocity(user_data.tracking_history[object_id])
             
             # Calculate lead time using simple ballistic model
-            lead_time = self.calculate_flight_time(distance_m, self.AIRSOFT_CONFIG)  # Time in seconds
+            lead_time = user_data.calculate_flight_time(distance_m, user_data.AIRSOFT_CONFIG)  # Time in seconds
             
             # Predict where to aim based on object movement
-            aim_point = self.predict_aim_point(
-                current_position, velocity, distance_m, lead_time, object_width_px, self.AIRSOFT_CONFIG
-            )
+            aim_point = user_data.predict_aim_point(current_position, velocity, distance_m, lead_time, object_width_px, user_data.AIRSOFT_CONFIG)
 
             offset_x = aim_point[0] - current_position[0]
             offset_y = abs(aim_point[1] - current_position[1])
             
-            self.crosshair_prev_pos = aim_point
-            self.new_aim_point = (self.CROSSHAIR_POS[0] - offset_x, int(self.CROSSHAIR_POS[1] + offset_y))
+            user_data.crosshair_prev_pos = aim_point
+
+            user_data.new_aim_point = (user_data.CROSSHAIR_POS[0] - offset_x, int(user_data.CROSSHAIR_POS[1] + offset_y))
                             
             # Calculate drop for display purposes
-            drop_m = self.calculate_drop_off(distance_m, self.AIRSOFT_CONFIG)
-            real_object_width_m = self.REAL_OBJECT_WIDTH_MM / 1000.0
+            drop_m = user_data.calculate_drop_off(distance_m, user_data.AIRSOFT_CONFIG)
+            real_object_width_m = user_data.REAL_OBJECT_WIDTH_MM / 1000.0
             px_per_meter = object_width_px / real_object_width_m
             drop_px = drop_m * px_per_meter
             
-            # Store info for display
-            self.ballistic_info = {
-                'distance_m': distance_m,
-                'drop_m': drop_m,
-                'drop_px': drop_px,
-                'lead_time': lead_time,
-                'velocity': velocity,
-                'current_position': current_position
-            }
+            # Display distance and drop information at the bottom of the screen
+            info_text = f"Distance: {distance_m:.1f}m | Drop: {drop_m:.3f}m ({drop_px:.1f}px) | Time: {lead_time:.3f}s"
+            cv2.putText(frame, info_text, (10, frame.shape[0] - 20), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (255, 255, 255), 1)
             
-            return True
-        
-        return False
-
-    def create_velocity_graph(self):
-        """
-        Create velocity graph if matplotlib is available
-        """
-        try:
-            import matplotlib.pyplot as plt
-            
-            if not self.velocity_history:
-                print("No velocity data to plot.")
-                return
-            
-            velocities = np.array(self.velocity_history)
-            time_steps = np.arange(len(velocities))
-            
-            plt.figure(figsize=(10, 5))
-            plt.plot(time_steps, velocities[:, 0], label='Velocity X', color='blue')
-            plt.plot(time_steps, velocities[:, 1], label='Velocity Y', color='red')
-            
-            plt.title('Velocity Over Time')
-            plt.xlabel('Time Steps')
-            plt.ylabel('Velocity (pixels/s)')
-            plt.legend()
-            plt.grid()
-            plt.show()
-        except ImportError:
-            print("Matplotlib not available for velocity graph.")
-
-
-# User-defined callback function: This is the callback function that will be called when data is available from the pipeline
-def app_callback(pad, info, user_data):
-    user_data.increment()  # Using the user_data to count the number of frames
+            # Add current position to tracking queue
+            user_data.prev_points_queue.append(current_position)
     
-    buffer = info.get_buffer()  # Get the GstBuffer from the probe info
-    if buffer is None:  # Check if the buffer is valid
-        return Gst.PadProbeReturn.OK
-    
-    roi = hailo.get_roi_from_buffer(buffer)  # Get the ROI from the buffer
-    detections = roi.get_objects_typed(hailo.HAILO_DETECTION)  # Get the detections from the buffer
+    # Draw the adjusted aim point
+    aim_marker_pos = user_data.new_aim_point if user_data.new_aim_point else user_data.CROSSHAIR_POS
+    cv2.drawMarker(frame, aim_marker_pos, (0, 0, 255), cv2.MARKER_CROSS, 20, 2)
 
-    # Build detection string for display
-    string_to_print = f"Frame count: {user_data.get_count()}\n"
-    
-    # Process detections for ballistic calculations
-    if detections:
-        has_target = user_data.process_detections(detections)
-        
-        # Display detection info
-        for detection in detections:
-            label = detection.get_label()
-            confidence = detection.get_confidence()
-            string_to_print += f"Detection: {label} Confidence: {confidence:.2f}\n"
-            
-            # Add ballistic info if this is our target class
-            if label in user_data.accepted_classes and hasattr(user_data, 'ballistic_info'):
-                info = user_data.ballistic_info
-                string_to_print += f"Distance: {info['distance_m']:.1f}m | "
-                string_to_print += f"Drop: {info['drop_m']:.3f}m ({info['drop_px']:.1f}px) | "
-                string_to_print += f"Time: {info['lead_time']:.3f}s\n"
-                string_to_print += f"Velocity: X={info['velocity'][0]:.1f} Y={info['velocity'][1]:.1f} px/s\n"
-                
-                if user_data.new_aim_point:
-                    string_to_print += f"Aim Point: {user_data.new_aim_point}\n"
-    else:
-        string_to_print += "No detections\n"
-    
-    print(string_to_print)
+    # Update previous frame information
+    user_data.prev_gray = gray
+    user_data.prev_kp = kp
+    user_data.prev_des = des
+    user_data.frame_counter += 1
+
+    # Limit tracking queue size
+    if len(user_data.prev_points_queue) > 5:
+        user_data.prev_points_queue.pop(0)
+
+    # Set the frame for display
+    if user_data.use_frame:
+        # Convert the frame from RGB to BGR format for OpenCV
+        frame = cv2.cvtColor(frame, cv2.COLOR_RGB2BGR)
+        user_data.set_frame(frame)
+
     return Gst.PadProbeReturn.OK
 
+
 if __name__ == "__main__":
-    user_data = user_app_callback_class()  # Create an instance of the user app callback class
+    # Create an instance of the user app callback class
+    user_data = user_app_callback_class()
     app = GStreamerDetectionApp(app_callback, user_data)
     app.run()

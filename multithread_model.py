@@ -29,6 +29,12 @@ VIDEO_PATH = 0
 DISPLAY_RESOLUTION = (640, 480)
 YOLO_RESOLUTION = (640, 480)  # Lower resolution for YOLO processing
 
+# Video recording settings
+SAVE_VIDEO = True  # Set to False to disable recording
+OUTPUT_FILENAME = "ballistic_tracker_output.mp4"  # Output filename
+OUTPUT_FPS = 30  # Output video FPS
+OUTPUT_CODEC = 'mp4v'  # Codec (alternatives: 'XVID', 'MJPG', 'mp4v')
+
 # Threading parameters
 MAX_QUEUE_SIZE = 15  # Small queue to reduce latency
 DETECTION_INTERVAL = 1  # Process every 3rd frame
@@ -57,6 +63,7 @@ class BallisticTracker:
         self.current_aim_point = CROSSHAIR_POS
         self.running = True
         self.flip_180 = False
+        self.video_writer = None  # Add video writer
         
     def calculate_distance_mm(self, object_size_px):
         """Optimized distance calculation with pre-calculated focal length"""
@@ -84,7 +91,7 @@ class BallisticTracker:
         
         while x < distance_m and time_of_flight < 3:  # Reduced max time
             velocity_magnitude = math.sqrt(velocity_x**2 + velocity_y**2)
-            if velocity_magnitude <= 5:
+            if velocity_magnitude <= 5: 
                 break
                 
             drag_force = 0.5 * 1.225 * drag_coeff * area * velocity_magnitude**2
@@ -205,6 +212,29 @@ class BallisticTracker:
         
         return (int(future_x), int(future_y))
     
+    def setup_video_writer(self, fps):
+        """Initialize video writer for recording"""
+        if SAVE_VIDEO:
+            fourcc = cv2.VideoWriter_fourcc(*OUTPUT_CODEC)
+            self.video_writer = cv2.VideoWriter(
+                OUTPUT_FILENAME,
+                fourcc,
+                OUTPUT_FPS,  # Use consistent output FPS
+                DISPLAY_RESOLUTION
+            )
+            if self.video_writer.isOpened():
+                print(f"Recording video to: {OUTPUT_FILENAME}")
+                print(f"Output FPS: {OUTPUT_FPS}, Codec: {OUTPUT_CODEC}")
+            else:
+                print("Failed to open video writer!")
+                self.video_writer = None
+    
+    def cleanup_video_writer(self):
+        """Clean up video writer"""
+        if self.video_writer is not None:
+            self.video_writer.release()
+            print(f"Video saved to: {OUTPUT_FILENAME}")
+    
     def main_loop(self):
         """Main video processing loop"""
         cap = cv2.VideoCapture(VIDEO_PATH)
@@ -219,6 +249,9 @@ class BallisticTracker:
         
         print(f"Video FPS: {video_fps}, Frame duration: {frame_duration:.4f}s")
         
+        # Setup video recording
+        self.setup_video_writer(video_fps)
+        
         # Start detection thread
         detection_thread = threading.Thread(target=self.detect_objects_thread, daemon=True)
         detection_thread.start()
@@ -227,106 +260,120 @@ class BallisticTracker:
         frame_count = 0
         last_frame_time = start_time
         
-        while True:
-            ret, frame = cap.read()
-            if not ret:
-                break
+        try:
+            while True:
+                ret, frame = cap.read()
+                if not ret:
+                    break
+                    
+                current_time = time.time() - start_time
+                frame_count += 1
                 
-            current_time = time.time() - start_time
-            frame_count += 1
-            
-            # Send frame to detection thread (non-blocking)
-            if not self.frame_queue.full():
-                self.frame_queue.put((frame.copy(), current_time))
-            
-            # Check for detection results
-            try:
-                detected_objects, detection_time = self.result_queue.get_nowait()
+                # Send frame to detection thread (non-blocking)
+                if not self.frame_queue.full():
+                    self.frame_queue.put((frame.copy(), current_time))
                 
-                if detected_objects:
-                    '''
-                    for obj in detected_objects:
-                        if "bbox" in obj:
-                            x1, y1, x2, y2 = obj['bbox']
-                            cv2.rectangle(frame, (x1, y1), (x2, y2), (0, 255, 0), 2)
-                            label_text = f"{obj['class']}: {obj['confidence']:.2f}, "
-                            cv2.putText(frame, label_text, (x1, y1-10), 
-                                    cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 255, 0), 2)
-                    '''        
-                    main_object = detected_objects[0]
-                    object_id = f"{main_object['class']}_{0}"
-                    current_position = main_object["center"]
-                    object_width_px = main_object["w"]
+                # Check for detection results
+                try:
+                    detected_objects, detection_time = self.result_queue.get_nowait()
                     
-                    # Calculate distance
-                    distance_mm = self.calculate_distance_mm(object_width_px)
-                    distance_m = distance_mm / 1000
-                    print(f"Distance: {distance_m:.1f}m")
-                    
-                    # Update tracking history
-                    if object_id not in self.tracking_history:
-                        self.tracking_history[object_id] = deque(maxlen=MAX_HISTORY_FRAMES)
-                    self.tracking_history[object_id].append((current_position, detection_time))
-                    
-                    # Calculate velocity and aim point
-                    velocity = self.calculate_velocity(self.tracking_history[object_id])
-                    _, lead_time = self.calculate_ballistic_simple(distance_m)
-                    
-                    if lead_time > 0:
-                        aim_point = self.predict_aim_point(
-                            current_position, velocity, distance_m, lead_time, object_width_px
-                        )
+                    if detected_objects:
+                        '''
+                        for obj in detected_objects:
+                            if "bbox" in obj:
+                                x1, y1, x2, y2 = obj['bbox']
+                                cv2.rectangle(frame, (x1, y1), (x2, y2), (0, 255, 0), 2)
+                                label_text = f"{obj['class']}: {obj['confidence']:.2f}, "
+                                cv2.putText(frame, label_text, (x1, y1-10), 
+                                        cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 255, 0), 2)
+                        '''        
+                        main_object = detected_objects[0]
+                        object_id = f"{main_object['class']}_{0}"
+                        current_position = main_object["center"]
+                        object_width_px = main_object["w"]
                         
-                        # Update crosshair position
-                        offset_x = aim_point[0] - current_position[0]
-                        offset_y = aim_point[1] - current_position[1]
+                        # Calculate distance
+                        distance_mm = self.calculate_distance_mm(object_width_px)
+                        distance_m = distance_mm / 1000
+                        print(f"Distance: {distance_m:.1f}m")
                         
-                        self.current_aim_point = (CROSSHAIR_POS[0] - offset_x, CROSSHAIR_POS[1] + abs(offset_y)) if not self.flip_180 else (CROSSHAIR_POS[0] - offset_x, CROSSHAIR_POS[1] - abs(offset_y))
+                        # Update tracking history
+                        if object_id not in self.tracking_history:
+                            self.tracking_history[object_id] = deque(maxlen=MAX_HISTORY_FRAMES)
+                        self.tracking_history[object_id].append((current_position, detection_time))
                         
-                        # Display info
-                        drop_m, _ = self.calculate_ballistic_simple(distance_m)
-                        info_text = f"Distance: {distance_m:.1f}m | Drop: {drop_m:.3f}m | Time: {lead_time:.3f}s"
-                        cv2.putText(frame, info_text, (10, frame.shape[0] - 20), 
-                                  cv2.FONT_HERSHEY_SIMPLEX, 0.5, (255, 255, 255), 1)
+                        # Calculate velocity and aim point
+                        velocity = self.calculate_velocity(self.tracking_history[object_id])
+                        _, lead_time = self.calculate_ballistic_simple(distance_m)
                         
-            except queue.Empty:
-                pass
-            
-            # Draw crosshairs
-            cv2.drawMarker(frame, CROSSHAIR_POS, (255, 0, 0), cv2.MARKER_CROSS, 20, 2)
-            cv2.drawMarker(frame, self.current_aim_point, (0, 0, 255), cv2.MARKER_CROSS, 20, 2)
-            
-            # Show actual video FPS vs processing FPS
-            processing_fps = frame_count / (time.time() - start_time)
-            cv2.putText(frame, f"Video FPS: {video_fps:.1f} | Processing: {processing_fps:.1f}", 
-                       (10, 30), cv2.FONT_HERSHEY_SIMPLEX, 0.6, (255, 255, 255), 2)
-            
-            if self.flip_180:
-                frame = cv2.flip(frame, -1)
+                        if lead_time > 0:
+                            aim_point = self.predict_aim_point(
+                                current_position, velocity, distance_m, lead_time, object_width_px
+                            )
+                            
+                            # Update crosshair position
+                            offset_x = aim_point[0] - current_position[0]
+                            offset_y = aim_point[1] - current_position[1]
+                            
+                            self.current_aim_point = (CROSSHAIR_POS[0] - offset_x, CROSSHAIR_POS[1] + abs(offset_y)) if not self.flip_180 else (CROSSHAIR_POS[0] - offset_x, CROSSHAIR_POS[1] - abs(offset_y))
+                            
+                            # Display info
+                            drop_m, _ = self.calculate_ballistic_simple(distance_m)
+                            info_text = f"Distance: {distance_m:.1f}m | Drop: {drop_m:.3f}m | Time: {lead_time:.3f}s"
+                            cv2.putText(frame, info_text, (10, frame.shape[0] - 20), 
+                                      cv2.FONT_HERSHEY_SIMPLEX, 0.5, (255, 255, 255), 1)
+                            
+                except queue.Empty:
+                    pass
+                
+                # Draw crosshairs
+                cv2.drawMarker(frame, CROSSHAIR_POS, (255, 0, 0), cv2.MARKER_CROSS, 20, 2)
+                cv2.drawMarker(frame, self.current_aim_point, (0, 0, 255), cv2.MARKER_CROSS, 20, 2)
+                
+                # Show actual video FPS vs processing FPS
+                processing_fps = frame_count / (time.time() - start_time)
+                cv2.putText(frame, f"Video FPS: {video_fps:.1f} | Processing: {processing_fps:.1f}", 
+                           (10, 30), cv2.FONT_HERSHEY_SIMPLEX, 0.6, (255, 255, 255), 2)
+                
+                # Add recording indicator
+                if SAVE_VIDEO and self.video_writer is not None:
+                    cv2.circle(frame, (frame.shape[1] - 30, 30), 8, (0, 0, 255), -1)  # red dot
+                
+                if self.flip_180:
+                    frame = cv2.flip(frame, -1)
 
-            cv2.imshow("Optimized Ballistic Tracker", frame)
-            
-            # Control playback timing to match video FPS
-            current_time = time.time()
-            elapsed_since_last_frame = current_time - last_frame_time
-            time_to_wait = frame_duration - elapsed_since_last_frame
-            
-            if time_to_wait > 0:
-                # Use cv2.waitKey with calculated delay
-                wait_ms = max(1, int(time_to_wait * 1000))
-                key = cv2.waitKey(wait_ms) & 0xFF
-            else:
-                # If we're running behind, just check for key press
-                key = cv2.waitKey(1) & 0xFF
-            
-            last_frame_time = current_time
-            
-            if key == ord('q'):
-                break
+                # Write frame to video file before displaying
+                if SAVE_VIDEO and self.video_writer is not None:
+                    self.video_writer.write(frame)
+
+                cv2.imshow("Optimized Ballistic Tracker", frame)
+                
+                # Control playback timing to match video FPS
+                current_time = time.time()
+                elapsed_since_last_frame = current_time - last_frame_time
+                time_to_wait = frame_duration - elapsed_since_last_frame
+                
+                if time_to_wait > 0:
+                    # Use cv2.waitKey with calculated delay
+                    wait_ms = max(1, int(time_to_wait * 1000))
+                    key = cv2.waitKey(wait_ms) & 0xFF
+                else:
+                    # If we're running behind, just check for key press
+                    key = cv2.waitKey(1) & 0xFF
+                
+                last_frame_time = current_time
+                
+                if key == ord('q'):
+                    break
         
-        self.running = False
-        cap.release()
-        cv2.destroyAllWindows()
+        except KeyboardInterrupt:
+            print("Interrupted by user")
+        finally:
+            # Cleanup
+            self.running = False
+            cap.release()
+            self.cleanup_video_writer()  # Save and close video file
+            cv2.destroyAllWindows()
 
 if __name__ == "__main__":
     tracker = BallisticTracker()

@@ -9,10 +9,10 @@ import math
 MODEL_NAME = 'yolov8n.pt'  
 
 # Camera parameters
-FOCAL_LENGTH = 3     # Focal length in mm
-SENSOR_WIDTH_MM = 3  # Sensor width in mm
-REAL_OBJECT_WIDTH_MM = 500  # Real width of target object in mm
-VIDEO_PATH = 0  # Path to video file. Change to 0 (int) to use webcam
+FOCAL_LENGTH = 26     # Focal length in mm
+SENSOR_WIDTH_MM = 26  # Sensor width in mm
+REAL_OBJECT_WIDTH_MM = 4200  # Real width of target object in mm
+VIDEO_PATH = "25m1x.mov"  # Path to video file. Change to 0 (int) to use webcam
 RESOLUTION = (640, 480)  # Resolution of the video
 
 # Targeting parameters
@@ -28,14 +28,14 @@ AIR_DENSITY = 1.225  # kg/m³ at sea level
 
 # Airsoft BB configuration
 AIRSOFT_CONFIG = {
-    "muzzle_velocity": 120,  # m/s (328 ft/s)
+    "muzzle_velocity": 115,  # m/s (380 ft/s)
     "bb_mass": 0.00025,  # kg (0.25g BB)
     "bb_diameter": 0.006,  # m (6mm)
     "drag_coefficient": 0.47,  # Sphere drag coefficient
 }
 
-velocity_history = []
-accepted_classes = ["person"]  # Classes we want to track
+velocity_history = []   
+accepted_classes = ["car"]  # Classes we want to track
 
 def calculate_focal_length_pixels(focal_length_camera_mm, image_width_pixels, sensor_width_mm):
     if focal_length_camera_mm <= 0 or image_width_pixels <= 0 or sensor_width_mm <= 0:
@@ -153,7 +153,7 @@ def calculate_flight_time(distance_m, config):
         print(f"Time of flight: {time_of_flight:.3f} seconds, Distance: {distance_m:.1f} m")
         return time_of_flight
     else:
-        print("No valid solution for flight time, target may be too far.")
+        print(f"No valid solution for flight time, target may be too far., Distance:{distance_m:.1f} m]")
         return 0
 
 def calculate_velocity(position_history, time_window=TIME_WINDOW_VELOCITY):

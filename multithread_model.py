@@ -16,22 +16,22 @@ try:
 except:
     pass
 
-accepted_targets = ["car", "person"]  # YOLO classes to track
+accepted_targets = ["car"]  # YOLO classes to track
 
 # Optimized parameters for Pi 5
 MODEL_NAME = 'yolov8n.pt'
-FOCAL_LENGTH = 3
-SENSOR_WIDTH_MM = 3
+FOCAL_LENGTH = 26
+SENSOR_WIDTH_MM = 26
 REAL_OBJECT_WIDTH_MM = 4200
-VIDEO_PATH = 0
+VIDEO_PATH = "25m1x.mov"
 
 # Optimized resolutions
 DISPLAY_RESOLUTION = (640, 480)
 YOLO_RESOLUTION = (640, 480)  # Lower resolution for YOLO processing
 
 # Threading parameters
-MAX_QUEUE_SIZE = 2  # Small queue to reduce latency
-DETECTION_INTERVAL = 3  # Process every 3rd frame
+MAX_QUEUE_SIZE = 15  # Small queue to reduce latency
+DETECTION_INTERVAL = 1  # Process every 3rd frame
 MAX_HISTORY_FRAMES = 15  # Reduced from 30
 
 # Physics constants
@@ -56,6 +56,7 @@ class BallisticTracker:
         self.velocity_history = deque(maxlen=100)
         self.current_aim_point = CROSSHAIR_POS
         self.running = True
+        self.flip_180 = True
         
     def calculate_distance_mm(self, object_size_px):
         """Optimized distance calculation with pre-calculated focal length"""
@@ -110,7 +111,7 @@ class BallisticTracker:
                 frame_data = self.frame_queue.get(timeout=0.1)
                 if frame_data is None:
                     continue
-                    
+                
                 frame, timestamp = frame_data
                 frame_count += 1
                 
@@ -268,10 +269,8 @@ class BallisticTracker:
                         # Update crosshair position
                         offset_x = aim_point[0] - current_position[0]
                         offset_y = aim_point[1] - current_position[1]
-                        self.current_aim_point = (
-                            CROSSHAIR_POS[0] - offset_x,
-                            CROSSHAIR_POS[1] + abs(offset_y)
-                        )
+                        
+                        self.current_aim_point = (CROSSHAIR_POS[0] - offset_x, CROSSHAIR_POS[1] + abs(offset_y)) if not self.flip_180 else (CROSSHAIR_POS[0] - offset_x, CROSSHAIR_POS[1] - abs(offset_y))
                         
                         # Display info
                         drop_m, _ = self.calculate_ballistic_simple(distance_m)
@@ -291,6 +290,9 @@ class BallisticTracker:
             cv2.putText(frame, f"Video FPS: {video_fps:.1f} | Processing: {processing_fps:.1f}", 
                        (10, 30), cv2.FONT_HERSHEY_SIMPLEX, 0.6, (255, 255, 255), 2)
             
+            if self.flip_180:
+                frame = cv2.flip(frame, -1)
+
             cv2.imshow("Optimized Ballistic Tracker", frame)
             
             # Control playback timing to match video FPS

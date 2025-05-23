@@ -16,14 +16,14 @@ try:
 except:
     pass
 
-accepted_targets = ["car"]  # YOLO classes to track
+accepted_targets = ["car", "person"]  # YOLO classes to track
 
 # Optimized parameters for Pi 5
 MODEL_NAME = 'yolov8n.pt'
-FOCAL_LENGTH = 26
-SENSOR_WIDTH_MM = 26
-REAL_OBJECT_WIDTH_MM = 4200
-VIDEO_PATH = "25m1x.mov"
+FOCAL_LENGTH = 3
+SENSOR_WIDTH_MM = 3
+REAL_OBJECT_WIDTH_MM = 450
+VIDEO_PATH = 0
 
 # Optimized resolutions
 DISPLAY_RESOLUTION = (640, 480)
@@ -56,7 +56,7 @@ class BallisticTracker:
         self.velocity_history = deque(maxlen=100)
         self.current_aim_point = CROSSHAIR_POS
         self.running = True
-        self.flip_180 = True
+        self.flip_180 = False
         
     def calculate_distance_mm(self, object_size_px):
         """Optimized distance calculation with pre-calculated focal length"""
@@ -153,6 +153,7 @@ class BallisticTracker:
                                     'w': w,
                                     'h': h,
                                     'center': (int(cx), int(cy)),
+                                    'bbox': (int(x1 * scale_x), int(y1 * scale_y), int(x2 * scale_x), int(y2 * scale_y))
                                 })
                 
                 # Send results back
@@ -165,7 +166,7 @@ class BallisticTracker:
                 print(f"Detection thread error: {e}")
                 continue
     
-    def calculate_velocity(self, position_history, time_window=10):
+    def calculate_velocity(self, position_history, time_window=7):
         """Simplified velocity calculation"""
         if len(position_history) < 2:
             return (0, 0)
@@ -243,6 +244,15 @@ class BallisticTracker:
                 detected_objects, detection_time = self.result_queue.get_nowait()
                 
                 if detected_objects:
+                    '''
+                    for obj in detected_objects:
+                        if "bbox" in obj:
+                            x1, y1, x2, y2 = obj['bbox']
+                            cv2.rectangle(frame, (x1, y1), (x2, y2), (0, 255, 0), 2)
+                            label_text = f"{obj['class']}: {obj['confidence']:.2f}, "
+                            cv2.putText(frame, label_text, (x1, y1-10), 
+                                    cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 255, 0), 2)
+                    '''        
                     main_object = detected_objects[0]
                     object_id = f"{main_object['class']}_{0}"
                     current_position = main_object["center"]
@@ -251,6 +261,7 @@ class BallisticTracker:
                     # Calculate distance
                     distance_mm = self.calculate_distance_mm(object_width_px)
                     distance_m = distance_mm / 1000
+                    print(f"Distance: {distance_m:.1f}m")
                     
                     # Update tracking history
                     if object_id not in self.tracking_history:

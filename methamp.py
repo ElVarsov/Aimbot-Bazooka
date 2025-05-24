@@ -31,6 +31,8 @@ VIDEO_PATH = 0
 DISPLAY_RESOLUTION = (640, 480)
 YOLO_RESOLUTION = (640, 480)  # Lower resolution for YOLO processing
 
+USE_GRAYSCALE = True
+
 # Video recording settings
 SAVE_VIDEO = True  # Set to False to disable recording
 OUTPUT_FILENAME = "ballistic_tracker_output.mp4"  # Output filename
@@ -41,6 +43,13 @@ OUTPUT_CODEC = 'mp4v'  # Codec (alternatives: 'XVID', 'MJPG', 'mp4v')
 MAX_QUEUE_SIZE = 15  # Small queue to reduce latency
 DETECTION_INTERVAL = 1  # Process every 3rd frame
 MAX_HISTORY_FRAMES = 15  # Reduced from 30
+
+# Some affine tranformation type shi
+ENABLE_AFFINE_COMPENSATION = True  # Enable/disable camera movement compensation
+ORB_FEATURES = 500  # Reduced from 1000 for better performance
+MIN_GOOD_MATCHES = 10  # Minimum matches needed for affine calculation
+MAX_GOOD_MATCHES = 30  # Maximum matches to use (for performance)
+
 
 # Physics constants
 GRAVITY = 9.81
@@ -230,7 +239,56 @@ class BallisticTracker:
         self.current_orientation = {'pitch': 0, 'roll': 0, 'yaw': 0}
         self.imu = None
         self.init_imu()
+
+        if ENABLE_AFFINE_COMPENSATION:
+            self.orb = cv2.ORB_create(ORB_FEATURES)
+            self.bf = cv2.BFMatcher(cv2.NORM_HAMMING, crossCheck=True)
+            self.prev_kp = None
+            self.prev_des = None
+            self.prev_points_queue = deque(maxlen=10)  # Track recent object positions
         
+    def apply_affine_transformation(self, affine_matrix, point):
+        """Apply affine transformation to a point"""
+        if affine_matrix is None:
+            return point
+            
+        dot_position_array = np.array([point], dtype=np.float32)
+        A = affine_matrix[:, :2]
+        t = affine_matrix[:, 2]
+        transformed_point = (A @ dot_position_array.T + t.reshape(2, 1)).T
+        transformed_dot_position_tuple = (int(transformed_point[0][0]), int(transformed_point[0][1]))
+        return transformed_dot_position_tuple
+    
+    def calculate_affine_transformation(self, gray_frame):
+        """Calculate affine transformation between current and previous frame"""
+        if not ENABLE_AFFINE_COMPENSATION:
+            return None
+            
+        # Detect keypoints and descriptors
+        kp, des = self.orb.detectAndCompute(gray_frame, None)
+        
+        if des is None or self.prev_des is None:
+            self.prev_kp, self.prev_des = kp, des
+            return None
+        
+        # Match features between frames
+        matches = self.bf.match(self.prev_des, des)
+        matches = sorted(matches, key=lambda x: x.distance)
+        good_matches = matches[:MAX_GOOD_MATCHES]  # Use top matches
+        
+        affine_matrix = None
+        if len(good_matches) >= MIN_GOOD_MATCHES:
+            try:
+                pts1 = np.float32([self.prev_kp[m.queryIdx].pt for m in good_matches])
+                pts2 = np.float32([kp[m.trainIdx].pt for m in good_matches])
+                affine_matrix, _ = cv2.estimateAffine2D(pts1, pts2, method=cv2.RANSAC, ransacReprojThreshold=3.0)
+            except:
+                affine_matrix = None
+        
+        # Update previous frame data
+        self.prev_kp, self.prev_des = kp, des
+        return affine_matrix
+    
     def init_imu(self):
         """Initialize IMU sensor"""
         try:
@@ -371,6 +429,10 @@ class BallisticTracker:
                 # Resize frame for YOLO processing
                 yolo_frame = cv2.resize(frame, YOLO_RESOLUTION)
                 
+                if USE_GRAYSCALE:
+                    if len(yolo_frame.shape) == 3:
+                        gray_frame = cv2.cvtColor(yolo_frame, cv2.COLOR_BGR2GRAY)
+                        yolo_frame = cv2.cvtColor(gray_frame, cv2.COLOR_GRAY2BGR)
                 # Run YOLO detection
                 results = self.model.predict(yolo_frame, verbose=False)
                 detected_objects = []
@@ -508,6 +570,12 @@ class BallisticTracker:
         frame_count = 0
         last_frame_time = start_time
         
+
+        if ENABLE_AFFINE_COMPENSATION:
+            ret, prev_frame = cap.read()
+            if ret:
+                prev_gray = cv2.cvtColor(prev_frame, cv2.COLOR_BGR2GRAY)
+                self.prev_kp, self.prev_des = self.orb.detectAndCompute(prev_gray, None)
         try:
             while True:
                 ret, frame = cap.read()
@@ -517,6 +585,20 @@ class BallisticTracker:
                 current_time = time.time() - start_time
                 frame_count += 1
                 
+                affine_matrix = None
+                if ENABLE_AFFINE_COMPENSATION:
+                    gray_frame = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
+                    affine_matrix = self.calculate_affine_transformation(gray_frame)
+                    
+                    # Apply affine transformation to previous tracked points
+                    if affine_matrix is not None and len(self.prev_points_queue) > 0:
+                        transformed_points = []
+                        for point in self.prev_points_queue:
+                            transformed_point = self.apply_affine_transformation(affine_matrix, point)
+                            transformed_points.append(transformed_point)
+                        self.prev_points_queue = deque(transformed_points, maxlen=10)
+                
+
                 # Get latest IMU data
                 orientation = self.get_latest_imu_data()
                 
@@ -534,6 +616,8 @@ class BallisticTracker:
                         current_position = main_object["center"]
                         object_width_px = main_object["w"]
                         
+                        if ENABLE_AFFINE_COMPENSATION:
+                            self.prev_points_queue.append(current_position)
                         # Calculate distance
                         distance_mm = self.calculate_distance_mm(object_width_px)
                         distance_m = distance_mm / 1000

@@ -20,8 +20,8 @@ accepted_targets = ["car", "person"]  # YOLO classes to track
 
 # Optimized parameters for Pi 5
 MODEL_NAME = 'yolov8n.pt'
-FOCAL_LENGTH = 3
-SENSOR_WIDTH_MM = 3
+FOCAL_LENGTH = 100
+SENSOR_WIDTH_MM = 5
 REAL_OBJECT_WIDTH_MM = 450
 VIDEO_PATH = 0
 
@@ -35,9 +35,12 @@ OUTPUT_FILENAME = "ballistic_tracker_output.mp4"  # Output filename
 OUTPUT_FPS = 30  # Output video FPS
 OUTPUT_CODEC = 'mp4v'  # Codec (alternatives: 'XVID', 'MJPG', 'mp4v')
 
+# Grayscale settings
+USE_GRAYSCALE = True  # Enable grayscale processing for better performance
+
 # Threading parameters
 MAX_QUEUE_SIZE = 15  # Small queue to reduce latency
-DETECTION_INTERVAL = 1  # Process every 3rd frame
+DETECTION_INTERVAL = 1  # Process every frame
 MAX_HISTORY_FRAMES = 15  # Reduced from 30
 
 # Physics constants
@@ -63,7 +66,7 @@ class BallisticTracker:
         self.current_aim_point = CROSSHAIR_POS
         self.running = True
         self.flip_180 = False
-        self.video_writer = None  # Add video writer
+        self.video_writer = None
         
     def calculate_distance_mm(self, object_size_px):
         """Optimized distance calculation with pre-calculated focal length"""
@@ -109,7 +112,7 @@ class BallisticTracker:
         return drop_m, time_of_flight
     
     def detect_objects_thread(self):
-        """YOLO detection thread - runs independently"""
+        """YOLO detection thread - runs independently with grayscale processing"""
         frame_count = 0
         
         while self.running:
@@ -128,6 +131,13 @@ class BallisticTracker:
                 
                 # Resize frame for YOLO processing
                 yolo_frame = cv2.resize(frame, YOLO_RESOLUTION)
+                
+                # Convert to grayscale for better performance if enabled
+                if USE_GRAYSCALE:
+                    if len(yolo_frame.shape) == 3:  # If it's a color frame
+                        gray_frame = cv2.cvtColor(yolo_frame, cv2.COLOR_BGR2GRAY)
+                        # Convert back to 3-channel for YOLO (YOLOv8 expects 3 channels)
+                        yolo_frame = cv2.cvtColor(gray_frame, cv2.COLOR_GRAY2BGR)
                 
                 # Run YOLO detection
                 results = self.model.predict(yolo_frame, verbose=False)
@@ -242,12 +252,13 @@ class BallisticTracker:
         cap.set(cv2.CAP_PROP_FRAME_HEIGHT, DISPLAY_RESOLUTION[1])
         
         # Get video FPS for timing control
-        video_fps = cap.get(cv2.CAP_PROP_FPS)
+        video_fps = 30
         if video_fps <= 0:  # Fallback if FPS detection fails
             video_fps = 30
         frame_duration = 1.0 / video_fps  # Time between frames in seconds
         
         print(f"Video FPS: {video_fps}, Frame duration: {frame_duration:.4f}s")
+        print(f"Grayscale processing: {'Enabled' if USE_GRAYSCALE else 'Disabled'}")
         
         # Setup video recording
         self.setup_video_writer(video_fps)
@@ -278,15 +289,6 @@ class BallisticTracker:
                     detected_objects, detection_time = self.result_queue.get_nowait()
                     
                     if detected_objects:
-                        '''
-                        for obj in detected_objects:
-                            if "bbox" in obj:
-                                x1, y1, x2, y2 = obj['bbox']
-                                cv2.rectangle(frame, (x1, y1), (x2, y2), (0, 255, 0), 2)
-                                label_text = f"{obj['class']}: {obj['confidence']:.2f}, "
-                                cv2.putText(frame, label_text, (x1, y1-10), 
-                                        cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 255, 0), 2)
-                        '''        
                         main_object = detected_objects[0]
                         object_id = f"{main_object['class']}_{0}"
                         current_position = main_object["center"]
@@ -295,7 +297,6 @@ class BallisticTracker:
                         # Calculate distance
                         distance_mm = self.calculate_distance_mm(object_width_px)
                         distance_m = distance_mm / 1000
-                        print(f"Distance: {distance_m:.1f}m")
                         
                         # Update tracking history
                         if object_id not in self.tracking_history:

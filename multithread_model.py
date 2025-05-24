@@ -16,21 +16,21 @@ try:
 except:
     pass
 
-accepted_targets = ["car", "person"]  # YOLO classes to track
+accepted_targets = ["car"]  # YOLO classes to track
 
 # Optimized parameters for Pi 5
 MODEL_NAME = 'yolov8n.pt'
-FOCAL_LENGTH = 100
-SENSOR_WIDTH_MM = 5
-REAL_OBJECT_WIDTH_MM = 450
+FOCAL_LENGTH = 70
+SENSOR_WIDTH_MM = 8
+REAL_OBJECT_WIDTH_MM = 4200
 VIDEO_PATH = 0
 
 # Optimized resolutions
-DISPLAY_RESOLUTION = (640, 480)
+DISPLAY_RESOLUTION = (800, 480)
 YOLO_RESOLUTION = (640, 480)  # Lower resolution for YOLO processing
 
 # Video recording settings
-SAVE_VIDEO = True  # Set to False to disable recording
+SAVE_VIDEO = False  # Set to False to disable recording
 OUTPUT_FILENAME = "ballistic_tracker_output.mp4"  # Output filename
 OUTPUT_FPS = 30  # Output video FPS
 OUTPUT_CODEC = 'mp4v'  # Codec (alternatives: 'XVID', 'MJPG', 'mp4v')
@@ -43,6 +43,12 @@ MAX_QUEUE_SIZE = 15  # Small queue to reduce latency
 DETECTION_INTERVAL = 1  # Process every frame
 MAX_HISTORY_FRAMES = 15  # Reduced from 30
 
+# Affine transformation settings
+ENABLE_AFFINE_COMPENSATION = True  # Enable/disable camera movement compensation
+ORB_FEATURES = 500  # Reduced from 1000 for better performance
+MIN_GOOD_MATCHES = 10  # Minimum matches needed for affine calculation
+MAX_GOOD_MATCHES = 30  # Maximum matches to use (for performance)
+
 # Physics constants
 GRAVITY = 9.81
 AIRSOFT_CONFIG = {
@@ -54,7 +60,8 @@ AIRSOFT_CONFIG = {
 
 # Pre-calculate constants
 FOCAL_LENGTH_PIXELS = FOCAL_LENGTH * DISPLAY_RESOLUTION[0] / SENSOR_WIDTH_MM
-CROSSHAIR_POS = (DISPLAY_RESOLUTION[0] // 2, DISPLAY_RESOLUTION[1] // 2)
+CROSSHAIR_POS = (640, 360)
+#CROSSHAIR_POS = (DISPLAY_RESOLUTION[0] // 2, DISPLAY_RESOLUTION[1] // 2)  # Center of the display resolution
 
 class BallisticTracker:
     def __init__(self):
@@ -67,6 +74,56 @@ class BallisticTracker:
         self.running = True
         self.flip_180 = False
         self.video_writer = None
+        
+        # Affine transformation variables
+        if ENABLE_AFFINE_COMPENSATION:
+            self.orb = cv2.ORB_create(ORB_FEATURES)
+            self.bf = cv2.BFMatcher(cv2.NORM_HAMMING, crossCheck=True)
+            self.prev_kp = None
+            self.prev_des = None
+            self.prev_points_queue = deque(maxlen=10)  # Track recent object positions
+        
+    def apply_affine_transformation(self, affine_matrix, point):
+        """Apply affine transformation to a point"""
+        if affine_matrix is None:
+            return point
+            
+        dot_position_array = np.array([point], dtype=np.float32)
+        A = affine_matrix[:, :2]
+        t = affine_matrix[:, 2]
+        transformed_point = (A @ dot_position_array.T + t.reshape(2, 1)).T
+        transformed_dot_position_tuple = (int(transformed_point[0][0]), int(transformed_point[0][1]))
+        return transformed_dot_position_tuple
+    
+    def calculate_affine_transformation(self, gray_frame):
+        """Calculate affine transformation between current and previous frame"""
+        if not ENABLE_AFFINE_COMPENSATION:
+            return None
+            
+        # Detect keypoints and descriptors
+        kp, des = self.orb.detectAndCompute(gray_frame, None)
+        
+        if des is None or self.prev_des is None:
+            self.prev_kp, self.prev_des = kp, des
+            return None
+        
+        # Match features between frames
+        matches = self.bf.match(self.prev_des, des)
+        matches = sorted(matches, key=lambda x: x.distance)
+        good_matches = matches[:MAX_GOOD_MATCHES]  # Use top matches
+        
+        affine_matrix = None
+        if len(good_matches) >= MIN_GOOD_MATCHES:
+            try:
+                pts1 = np.float32([self.prev_kp[m.queryIdx].pt for m in good_matches])
+                pts2 = np.float32([kp[m.trainIdx].pt for m in good_matches])
+                affine_matrix, _ = cv2.estimateAffine2D(pts1, pts2, method=cv2.RANSAC, ransacReprojThreshold=3.0)
+            except:
+                affine_matrix = None
+        
+        # Update previous frame data
+        self.prev_kp, self.prev_des = kp, des
+        return affine_matrix
         
     def calculate_distance_mm(self, object_size_px):
         """Optimized distance calculation with pre-calculated focal length"""
@@ -259,6 +316,7 @@ class BallisticTracker:
         
         print(f"Video FPS: {video_fps}, Frame duration: {frame_duration:.4f}s")
         print(f"Grayscale processing: {'Enabled' if USE_GRAYSCALE else 'Disabled'}")
+        print(f"Affine compensation: {'Enabled' if ENABLE_AFFINE_COMPENSATION else 'Disabled'}")
         
         # Setup video recording
         self.setup_video_writer(video_fps)
@@ -271,7 +329,15 @@ class BallisticTracker:
         frame_count = 0
         last_frame_time = start_time
         
+        # Initialize first frame for affine transformation
+        if ENABLE_AFFINE_COMPENSATION:
+            ret, prev_frame = cap.read()
+            if ret:
+                prev_gray = cv2.cvtColor(prev_frame, cv2.COLOR_BGR2GRAY)
+                self.prev_kp, self.prev_des = self.orb.detectAndCompute(prev_gray, None)
+        
         try:
+            c_frames_not_detected = 0
             while True:
                 ret, frame = cap.read()
                 if not ret:
@@ -279,6 +345,22 @@ class BallisticTracker:
                     
                 current_time = time.time() - start_time
                 frame_count += 1
+                
+                cv2.drawMarker(frame, CROSSHAIR_POS, (255, 0, 0), cv2.MARKER_CROSS, 1300, 2)
+
+                # Calculate affine transformation for camera movement compensation
+                affine_matrix = None
+                if ENABLE_AFFINE_COMPENSATION:
+                    gray_frame = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
+                    affine_matrix = self.calculate_affine_transformation(gray_frame)
+                    
+                    # Apply affine transformation to previous tracked points
+                    if affine_matrix is not None and len(self.prev_points_queue) > 0:
+                        transformed_points = []
+                        for point in self.prev_points_queue:
+                            transformed_point = self.apply_affine_transformation(affine_matrix, point)
+                            transformed_points.append(transformed_point)
+                        self.prev_points_queue = deque(transformed_points, maxlen=10)
                 
                 # Send frame to detection thread (non-blocking)
                 if not self.frame_queue.full():
@@ -289,10 +371,15 @@ class BallisticTracker:
                     detected_objects, detection_time = self.result_queue.get_nowait()
                     
                     if detected_objects:
+                        c_frames_not_detected = 0
                         main_object = detected_objects[0]
                         object_id = f"{main_object['class']}_{0}"
                         current_position = main_object["center"]
                         object_width_px = main_object["w"]
+                        
+                        # Add current position to tracking queue for affine compensation
+                        if ENABLE_AFFINE_COMPENSATION:
+                            self.prev_points_queue.append(current_position)
                         
                         # Calculate distance
                         distance_mm = self.calculate_distance_mm(object_width_px)
@@ -320,17 +407,31 @@ class BallisticTracker:
                             
                             # Display info
                             drop_m, _ = self.calculate_ballistic_simple(distance_m)
-                            info_text = f"Distance: {distance_m:.1f}m | Drop: {drop_m:.3f}m | Time: {lead_time:.3f}s"
+                            compensation_status = "ON" if ENABLE_AFFINE_COMPENSATION and affine_matrix is not None else "OFF"
+                            info_text = f"Distance: {distance_m:.1f}m | Drop: {drop_m:.3f}m | Time: {lead_time:.3f}s | Stab: {compensation_status}"
                             cv2.putText(frame, info_text, (10, frame.shape[0] - 20), 
                                       cv2.FONT_HERSHEY_SIMPLEX, 0.5, (255, 255, 255), 1)
-                            
+                    else:
+                        c_frames_not_detected += 1 
+            
+
                 except queue.Empty:
                     pass
+
+                if c_frames_not_detected <=  5:
+                    cv2.drawMarker(frame, self.current_aim_point, (0, 0, 255), cv2.MARKER_CROSS, 20, 2)
                 
-                # Draw crosshairs
-                cv2.drawMarker(frame, CROSSHAIR_POS, (255, 0, 0), cv2.MARKER_CROSS, 20, 2)
-                cv2.drawMarker(frame, self.current_aim_point, (0, 0, 255), cv2.MARKER_CROSS, 20, 2)
+                # Draw tracking points if affine compensation is enabled
+                '''
+                THIS DRAWS THE PREVIOUS POSITIONS OF THE OBJECTS
+                ATTENTION: BIG DELAY
+
+                if ENABLE_AFFINE_COMPENSATION and len(self.prev_points_queue) > 0:
+                    for i, point in enumerate(self.prev_points_queue):
+                        color_intensity = int(255 * (i + 1) / len(self.prev_points_queue))
+                        cv2.circle(frame, point, 3, (0, color_intensity, 255 - color_intensity), -1)
                 
+                '''        
                 # Show actual video FPS vs processing FPS
                 processing_fps = frame_count / (time.time() - start_time)
                 cv2.putText(frame, f"Video FPS: {video_fps:.1f} | Processing: {processing_fps:.1f}", 
@@ -347,7 +448,7 @@ class BallisticTracker:
                 if SAVE_VIDEO and self.video_writer is not None:
                     self.video_writer.write(frame)
 
-                cv2.imshow("Optimized Ballistic Tracker", frame)
+                cv2.imshow("Enhanced Ballistic Tracker", frame)
                 
                 # Control playback timing to match video FPS
                 current_time = time.time()
@@ -366,7 +467,7 @@ class BallisticTracker:
                 
                 if key == ord('q'):
                     break
-        
+                
         except KeyboardInterrupt:
             print("Interrupted by user")
         finally:

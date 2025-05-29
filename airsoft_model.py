@@ -8,34 +8,34 @@ import math
 
 MODEL_NAME = 'yolov8n.pt'  
 
-# Camera parameters
-FOCAL_LENGTH = 26     # Focal length in mm
-SENSOR_WIDTH_MM = 26  # Sensor width in mm
-REAL_OBJECT_WIDTH_MM = 4200  # Real width of target object in mm
-VIDEO_PATH = "25m1x.mov"  # Path to video file. Change to 0 (int) to use webcam
-RESOLUTION = (640, 480)  # Resolution of the video
+# Camera params
+FOCAL_LENGTH_MM = 26  
+SENSOR_WIDTH_MM = 26  
+REAL_OBJECT_WIDTH_MM = 4200  
+VIDEO_PATH = "25m1x.mov"  
+RESOLUTION = (640, 480) 
 
-# Targeting parameters
-MAX_HISTORY_FRAMES = 30  # Maxqimum number of past frames to keep for velocity calculation
-TIME_WINDOW_VELOCITY = 30  # Actual time window for velocity calculations (frames)
-DETECTION_INTERVAL = 1  # Interval for object detection (in frames)
-CROSSHAIR_POS = (RESOLUTION[0] // 2, RESOLUTION[1] // 2)  # position in the center
-MAX_BULLET_TRAVEL_TIME = 5
+# Targeting params
+MAX_HISTORY_FRAMES = 30  # for velocity calculations
+TIME_WINDOW_VELOCITY = 30 
+DETECTION_INTERVAL = 1  
+CROSSHAIR_POS = (RESOLUTION[0] // 2, RESOLUTION[1] // 2)
+MAX_BULLET_TRAVEL_TIME_SECONDS = 5
+MIN_BULLET_SPEED_MS = 5
 
 # Physics constants
-GRAVITY = 9.81  # m/s^2
-AIR_DENSITY = 1.225  # kg/m³ at sea level
+GRAVITY = 9.81  
+AIR_DENSITY = 1.225  
 
-# Airsoft BB configuration
 AIRSOFT_CONFIG = {
-    "muzzle_velocity": 115,  # m/s (380 ft/s)
-    "bb_mass": 0.00025,  # kg (0.25g BB)
-    "bb_diameter": 0.006,  # m (6mm)
-    "drag_coefficient": 0.47,  # Sphere drag coefficient
+    "muzzle_velocity_ms": 115,  
+    "bb_mass_kg": 0.00025,  
+    "bb_diameter_m": 0.006,  
+    "drag_coefficient": 0.47,  
 }
 
 velocity_history = []   
-accepted_classes = ["car"]  # Classes we want to track
+accepted_classes = ["car"]  
 
 def calculate_focal_length_pixels(focal_length_camera_mm, image_width_pixels, sensor_width_mm):
     if focal_length_camera_mm <= 0 or image_width_pixels <= 0 or sensor_width_mm <= 0:
@@ -90,52 +90,48 @@ def calculate_ballistic_trajectory_simple(distance_m, config):
     Calculate bullet trajectory using simple drag and Euler's method
     Returns drop in meters and time of flight
     """
-    muzzle_velocity = config["muzzle_velocity"]  # m/s
-    mass = config["bb_mass"]  # kg
-    diameter = config["bb_diameter"]  # m
+    muzzle_velocity = config["muzzle_velocity_ms"]
+    mass = config["bb_mass_kg"]  
+    diameter = config["bb_diameter_m"]  
     drag_coeff = config["drag_coefficient"]
     
-    # Calculate cross-sectional area
     area = math.pi * (diameter / 2) ** 2  # m²
     
-    # Time step for numerical integration (seconds)
+    # time step for eulers method (seconds)
     dt = 0.001
     
-    # Initial conditions
-    velocity_x = muzzle_velocity  # m/s horizontal
-    velocity_y = 0  # m/s vertical (starts horizontal)
-    x = 0  # horizontal position (m)
-    y = 0  # vertical position (m) - positive is up
+    # initial conditions
+    velocity_x = muzzle_velocity  
+    velocity_y = 0  
+    x = 0  
+    y = 0  
     
     time_of_flight = 0
     
-    # Numerical integration using Euler's method
-    while x < distance_m and time_of_flight < MAX_BULLET_TRAVEL_TIME:
-        # Calculate total velocity magnitude
+    # numerical integration using eulers method
+    while x < distance_m and time_of_flight < MAX_BULLET_TRAVEL_TIME_SECONDS:
+        
         velocity_magnitude = math.sqrt(velocity_x**2 + velocity_y**2)
         
         if velocity_magnitude <= 0:
             break
             
-        # Calculate drag force magnitude
         drag_force = 0.5 * AIR_DENSITY * drag_coeff * area * velocity_magnitude**2
         
-        # Calculate drag acceleration components (opposite to velocity direction)
         drag_accel_x = -(drag_force / mass) * (velocity_x / velocity_magnitude)
         drag_accel_y = -(drag_force / mass) * (velocity_y / velocity_magnitude)
         
-        # Update velocities (drag + gravity)
         velocity_x += drag_accel_x * dt
-        velocity_y += (drag_accel_y - GRAVITY) * dt  # Gravity acts downward
+        velocity_y += (drag_accel_y - GRAVITY) * dt # -gravity cos gravity acts downwards
         
-        # Update positions
+        # update position
         x += velocity_x * dt
         y += velocity_y * dt
         
         time_of_flight += dt
         
-        # Break if velocity becomes too low
-        if velocity_magnitude < 5:  # m/s
+        # break if velocity becomes too low 
+        if velocity_magnitude < MIN_BULLET_SPEED_MS:
             break
     
     # Return drop in meters (negative y means drop) and time of flight
@@ -149,7 +145,7 @@ def calculate_flight_time(distance_m, config):
     """
     _, time_of_flight = calculate_ballistic_trajectory_simple(distance_m, config)
     
-    if time_of_flight > 0 and time_of_flight < MAX_BULLET_TRAVEL_TIME:
+    if time_of_flight > 0 and time_of_flight < MAX_BULLET_TRAVEL_TIME_SECONDS:
         print(f"Time of flight: {time_of_flight:.3f} seconds, Distance: {distance_m:.1f} m")
         return time_of_flight
     else:
@@ -248,9 +244,9 @@ def main():
     model = YOLO(MODEL_NAME)
     
     print("Airsoft Ballistic Tracking System")
-    print(f"Muzzle velocity: {AIRSOFT_CONFIG['muzzle_velocity']} m/s")
-    print(f"BB mass: {AIRSOFT_CONFIG['bb_mass']*1000:.2f} g")
-    print(f"BB diameter: {AIRSOFT_CONFIG['bb_diameter']*1000:.0f} mm")
+    print(f"Muzzle velocity: {AIRSOFT_CONFIG['muzzle_velocity_ms']} m/s")
+    print(f"BB mass: {AIRSOFT_CONFIG['bb_mass_kg']*1000:.2f} g")
+    print(f"BB diameter: {AIRSOFT_CONFIG['bb_diameter_m']*1000:.0f} mm")
     print(f"Drag coefficient: {AIRSOFT_CONFIG['drag_coefficient']}")
     
     # Open the video capture device (file or webcam)
@@ -333,7 +329,7 @@ def main():
                 object_width_px = main_object["w"]  # Width of the object in pixels
                 
                 # Calculate distance to object using camera parameters
-                focal_length_pixels = calculate_focal_length_pixels(FOCAL_LENGTH, frame.shape[1], SENSOR_WIDTH_MM)
+                focal_length_pixels = calculate_focal_length_pixels(FOCAL_LENGTH_MM, frame.shape[1], SENSOR_WIDTH_MM)
                 distance_mm = calculate_distance_mm(focal_length_pixels, REAL_OBJECT_WIDTH_MM, object_width_px)
                 distance_m = distance_mm / 1000  # Convert to meters
                 
